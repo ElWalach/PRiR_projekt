@@ -1,195 +1,141 @@
 #include <iostream>
-#include <vector>
-#include <thread>
-#include <future>
-#include <cmath>
-#include <random>
-#include <chrono>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <cmath>
+#include <chrono>
 
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
-// ===== Pomocnicze funkcje =====
-vector<vector<double>> genTridiagonalSPD(int N) {
-    vector<vector<double>> A(N, vector<double>(N, 0.0));
+const int PORT = 8080;
+const double EPSILON = 1e-6;
+const int MAX_ITER = 1000;
+
+
+vector<double> solveChebyshev(int N, vector<vector<double>>& A, vector<double>& b) {
+    vector<double> x(N, 0.0);
+    vector<double> x_prev(N, 0.0);
+    vector<double> x_temp(N, 0.0);
+    double lambda_min = 0.1, lambda_max = 2.0;
+    double d = (lambda_max + lambda_min) / 2.0;
+    double c = (lambda_max - lambda_min) / 2.0;
+
+    
+    double omega = 2.0 / (lambda_max + lambda_min);
     for (int i = 0; i < N; i++) {
-        A[i][i] = 2.0;
-        if (i > 0) A[i][i - 1] = -1.0;
-        if (i < N - 1) A[i][i + 1] = -1.0;
+        double sum = b[i];
+        for (int j = 0; j < N; j++) { if (i != j) sum -= A[i][j] * x[j]; }
+        double residual = sum / A[i][i] - x[i];
+        x_temp[i] = x[i] + omega * residual;
     }
-    return A;
-}
+    x_prev = x;
+    x = x_temp;
 
-vector<double> genRHS(int N) {
-    vector<double> b(N);
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_real_distribution<> dis(0.0, 1.0);
-    for (int i = 0; i < N; i++) b[i] = dis(gen);
-    return b;
-}
-
-pair<double, double> estimateEigenBounds(const vector<vector<double>>& A) {
-    int N = A.size();
-    double minv = numeric_limits<double>::infinity();
-    double maxv = -numeric_limits<double>::infinity();
-    for (int i = 0; i < N; i++) {
-        double d = A[i][i];
-        double off = 0;
-        for (int j = 0; j < N; j++) if (i != j) off += abs(A[i][j]);
-        minv = min(minv, d - off);
-        maxv = max(maxv, d + off);
-    }
-    if (minv <= 0) minv = 1e-6;
-    return {minv, maxv};
-}
-
-// ===== Sekwencyjna metoda Czebyszewa =====
-vector<double> solveChebyshevSeq(const vector<vector<double>>& A, const vector<double>& b, int maxIter, double tol) {
-    int N = b.size();
-    vector<double> x(N, 0.0), r = b, p = r, Ap(N, 0.0);
-    auto [lambdaMin, lambdaMax] = estimateEigenBounds(A);
-    double theta = (lambdaMax + lambdaMin) / 2.0;
-    double delta = (lambdaMax - lambdaMin) / 2.0;
-    double alphaPrev = 1.0 / theta;
-
-    for (int iter = 0; iter < maxIter; iter++) {
-        for (int i = 0; i < N; i++) {
-            double sum = 0;
-            for (int j = 0; j < N; j++) sum += A[i][j] * p[j];
-            Ap[i] = sum;
-        }
-
-        double alpha = (iter == 0)
-            ? 1.0 / theta
-            : 1.0 / (theta - (alphaPrev * alphaPrev * delta * delta) / 4.0);
+    
+    for (int k = 1; k < MAX_ITER; k++) {
+        double mu_k = (k == 1) ? (2.0 * d / c) : (4.0 * d / c - 2.0);
+        double omega_k = 4.0 / (c * mu_k);
+        double rho_k = 1.0 - omega_k * c / 2.0;
 
         for (int i = 0; i < N; i++) {
-            x[i] += alpha * p[i];
-            r[i] -= alpha * Ap[i];
+            double sum = b[i];
+            for (int j = 0; j < N; j++) { if (i != j) sum -= A[i][j] * x[j]; }
+            double x_richardson = sum / A[i][i];
+            x_temp[i] = omega_k * x_richardson + rho_k * x[i] + (1.0 - omega_k - rho_k) * x_prev[i];
         }
 
-        double norm = 0;
-        for (auto v : r) norm += v * v;
-        norm = sqrt(norm);
-        if (norm < tol) break;
+        double error = 0.0;
+        for (int i = 0; i < N; i++) { error += abs(x_temp[i] - x[i]); }
+        
+        x_prev = x;
+        x = x_temp;
 
-        double beta = (alphaPrev * alphaPrev * delta * delta) / 4.0;
-        for (int i = 0; i < N; i++) p[i] = r[i] + beta * p[i];
-        alphaPrev = alpha;
+        if (error < EPSILON) break;
     }
     return x;
 }
 
-// ===== Równoległa metoda Czebyszewa =====
-vector<double> solveChebyshevParallel(const vector<vector<double>>& A, const vector<double>& b,
-                                       int nThreads, int maxIter, double tol) {
-    int N = b.size();
-    vector<double> x(N, 0.0), r = b, p = r, Ap(N, 0.0);
-    auto [lambdaMin, lambdaMax] = estimateEigenBounds(A);
-    double theta = (lambdaMax + lambdaMin) / 2.0;
-    double delta = (lambdaMax - lambdaMin) / 2.0;
-    double alphaPrev = 1.0 / theta;
 
-    int chunk = (N + nThreads - 1) / nThreads;
-
-    for (int iter = 0; iter < maxIter; iter++) {
-        vector<future<void>> tasks;
-        for (int t = 0; t < nThreads; t++) {
-            int start = t * chunk;
-            int end = min(N, (t + 1) * chunk);
-            if (start >= end) break;
-            tasks.push_back(async(launch::async, [&, start, end]() {
-                for (int i = start; i < end; i++) {
-                    double sum = 0;
-                    for (int j = 0; j < N; j++) sum += A[i][j] * p[j];
-                    Ap[i] = sum;
-                }
-            }));
+void generateSystem(int N, vector<vector<double>>& A, vector<double>& b) {
+    A.assign(N, vector<double>(N));
+    b.resize(N);
+    srand(time(NULL) + N + GetCurrentProcessId());
+    for (int i = 0; i < N; i++) {
+        double sum = 0.0;
+        for (int j = 0; j < N; j++) {
+            if (i != j) {
+                A[i][j] = (rand() % 10) + 1;
+                sum += abs(A[i][j]);
+            }
         }
-        for (auto& t : tasks) t.get();
-
-        double alpha = (iter == 0)
-            ? 1.0 / theta
-            : 1.0 / (theta - (alphaPrev * alphaPrev * delta * delta) / 4.0);
-
-        for (int i = 0; i < N; i++) {
-            x[i] += alpha * p[i];
-            r[i] -= alpha * Ap[i];
-        }
-
-        double norm = 0;
-        for (auto v : r) norm += v * v;
-        norm = sqrt(norm);
-        if (norm < tol) break;
-
-        double beta = (alphaPrev * alphaPrev * delta * delta) / 4.0;
-        for (int i = 0; i < N; i++) p[i] = r[i] + beta * p[i];
-        alphaPrev = alpha;
+        A[i][i] = sum + (rand() % 10) + 10;
+        b[i] = (rand() % 100) + 1;
     }
-
-    return x;
 }
 
-// ======= Serwer główny =======
+// Funkcja obsługi klienta
+DWORD WINAPI handleClient(LPVOID lpParam) {
+    SOCKET clientSocket = (SOCKET)lpParam;
+    char buffer[1024];
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+
+    if (bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+        int N = atoi(buffer);
+
+        
+
+        auto start = chrono::high_resolution_clock::now();
+        vector<vector<double>> A;
+        vector<double> b;
+        generateSystem(N, A, b);
+        vector<double> solution = solveChebyshev(N, A, b);
+        auto end = chrono::high_resolution_clock::now();
+        auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+
+        
+        stringstream ss;
+        ss << "N=" << N << " Czas=" << duration.count() << "ms Rozwiazanie: ";
+        for (int i = 0; i < min(5, N); i++) {
+            ss << "x[" << i << "]=" << solution[i] << " ";
+        }
+        
+        string result = ss.str();
+        send(clientSocket, result.c_str(), result.length(), 0);
+
+        
+    }
+
+    closesocket(clientSocket);
+    return 0;
+}
+
 int main() {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-    int port = 12345;
-    int nThreads = 8;
-    int maxIter = 10000;
-    double tol = 1e-6;
-
     SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in serverAddr{};
+
+    sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(port);
 
     bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
-    listen(serverSocket, 5);
+    listen(serverSocket, 10);
 
-    cout << "Serwer uruchomiony. Oczekiwanie na polaczenia..." << endl;
+    cout << "=== SERWER URUCHOMIONY (tryb cichy) ===" << endl;
+    cout << "Nasluchuje na porcie " << PORT << "..." << endl;
 
     while (true) {
-        sockaddr_in clientAddr{};
-        int clientSize = sizeof(clientAddr);
-        SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
-
-        cout << "Polaczono z klientem." << endl;
-
-        thread([clientSocket, nThreads, maxIter, tol]() {
-            int N;
-            recv(clientSocket, (char*)&N, sizeof(int), 0);
-            cout << "Odebrano ządanie N=" << N << endl;
-
-            auto A = genTridiagonalSPD(N);
-            auto b = genRHS(N);
-
-            auto start = chrono::high_resolution_clock::now();
-            auto xPar = solveChebyshevParallel(A, b, nThreads, maxIter, tol);
-            auto end = chrono::high_resolution_clock::now();
-            double czasPar = chrono::duration<double>(end - start).count();
-
-            start = chrono::high_resolution_clock::now();
-            auto xSeq = solveChebyshevSeq(A, b, maxIter, tol);
-            end = chrono::high_resolution_clock::now();
-            double czasSeq = chrono::duration<double>(end - start).count();
-
-            send(clientSocket, (char*)&czasPar, sizeof(double), 0);
-            send(clientSocket, (char*)&czasSeq, sizeof(double), 0);
-
-            int len = xPar.size();
-            send(clientSocket, (char*)&len, sizeof(int), 0);
-            send(clientSocket, (char*)xPar.data(), len * sizeof(double), 0);
-
-            closesocket(clientSocket);
-            cout << "Wyniki wyslane do klienta." << endl;
-        }).detach();
+        SOCKET clientSocket = accept(serverSocket, NULL, NULL);
+        if (clientSocket != INVALID_SOCKET) {
+            CreateThread(NULL, 0, handleClient, (LPVOID)clientSocket, 0, NULL);
+        }
     }
 
     closesocket(serverSocket);
