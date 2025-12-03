@@ -122,7 +122,7 @@ void runTest(int n, double& t_seq, int& it_seq,
 }
 
 int main() {
-    vector<int> sizes = {10, 100, 1000, 10000, 100000};
+    vector<int> sizes = {10, 100, 1000, 10000};
 
   
 

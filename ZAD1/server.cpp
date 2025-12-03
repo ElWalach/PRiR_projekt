@@ -46,8 +46,7 @@ vector<double> matrixVectorMultiplyParallel(const vector<vector<double>>& A,
                                            const vector<double>& x,
                                            int num_processes) {
     int n = A.size();
-    if (n < 200 || num_processes <= 1)
-        return matrixVectorMultiply(A, x);
+    
 
     char tmpfile[] = "/tmp/matrix_result_XXXXXX";
     int fd = mkstemp(tmpfile);
