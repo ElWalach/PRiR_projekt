@@ -33,6 +33,9 @@ struct Result {
 };
 
 //  MULTIPLIKACJE
+
+
+//sekwencyjne mnozenie macierzy przez wektor
 vector<double> matrixVectorMultiply(const vector<vector<double>>& A, const vector<double>& x) {
     int n = A.size();
     vector<double> r(n, 0.0);
@@ -42,19 +45,35 @@ vector<double> matrixVectorMultiply(const vector<vector<double>>& A, const vecto
     return r;
 }
 
+
+//równoległe mnozenie wektorów macierzy za pomocą fork() i mmap
+
 vector<double> matrixVectorMultiplyParallel(const vector<vector<double>>& A,
                                            const vector<double>& x,
                                            int num_processes) {
     int n = A.size();
     
 
-    char tmpfile[] = "/tmp/matrix_result_XXXXXX";
-    int fd = mkstemp(tmpfile);
-    if (fd == -1)
+    char tmpfile[] = "/tmp/matrix_result_XXXXXX"; //tworzymy tymczasowy plik ktory potrzebujemy do stworzenia paimeci wspoldzielonej dla procesów
+    int fd = mkstemp(tmpfile);  // mkstemp - otwarcie podanego pliku i zwrocenie jego deskryptora
+
+    if (fd == -1) // jesi plik sie nie otwiera, wracamy do sekwencjnej 
         return matrixVectorMultiply(A, x);
 
-    ftruncate(fd, n * sizeof(double));
-    double* shared = (double*)mmap(NULL, n * sizeof(double),
+    ftruncate(fd, n * sizeof(double));  // funkcja ftruncate ustawia dlugosc wskazanego przez deskryptor fd pliku na okresloną dlugosc
+
+
+
+
+    /*Mapuje ten plik do pamięci współdzielonej między procesami.
+                                    NULL - sam wybiera adres
+                                    ile pamięci mapować
+                                    procesy mogą pisać i czytać
+                                    map_shared - zmiany sąwidoczne dla innych procesów
+                                    fd - plik powiązany
+                                    0 - offset w pliku
+    */
+    double* shared = (double*)mmap(NULL, n * sizeof(double),    
                                    PROT_READ | PROT_WRITE,
                                    MAP_SHARED, fd, 0);
 
