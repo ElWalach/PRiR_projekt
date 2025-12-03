@@ -1,0 +1,6 @@
+cd ~/PRiR_projekt/ZAD1
+gcc -std=c99 -O2 -I/usr/include/tirpc -o server \
+    server.c chebyshev_svc.c chebyshev_xdr.c -ltirpc -lm
+    
+gcc -std=c99 -O2 -I/usr/include/tirpc -o client \
+    client.c chebyshev_svc.c chebyshev_xdr.c -ltirpc -lm
