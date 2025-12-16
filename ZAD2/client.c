@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <tirpc/rpc/rpc.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -123,7 +124,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("Użycie: %s <host>\n", argv[0]);
         exit(1);
-    }
+    } 
 
     host = argv[1];
 

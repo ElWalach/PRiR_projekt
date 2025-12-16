@@ -46,10 +46,7 @@ void matrixVectorMultiply(double** A, double* x, double* result, int n) {
 
 // Równoległe mnożenie macierz-wektor
 void matrixVectorMultiplyParallel(double** A, double* x, double* result, int n, int num_procs) {
-    if (n < 200 || num_procs <= 1) {
-        matrixVectorMultiply(A, x, result, n);
-        return;
-    }
+    
 
     char tmpfile[] = "/tmp/matrix_result_XXXXXX";
     int fd = mkstemp(tmpfile);
