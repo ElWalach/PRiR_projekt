@@ -1,0 +1,13 @@
+0: Created array of size 10000, expected sum: 50005000
+1: Received 2500 elements
+1: Local sum = 9376250
+2: Received 2500 elements
+2: Local sum = 15626250
+0: Received 2500 elements
+0: Local sum = 3126250
+3: Received 2500 elements
+3: Local sum = 21876250
+0: Received sums from all processes
+0: Total sum = 50005000
+0: Expected sum = 50005000
+0: SUCCESS! Sums match!

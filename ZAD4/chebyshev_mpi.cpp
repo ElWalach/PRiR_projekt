@@ -23,7 +23,7 @@ vector<double> matrixVectorMultiply(const vector<vector<double>>& A, const vecto
 }
 
 // Mnożenie macierzy przez wektor - wersja równoległa z topologią bez sąsiedztwa
-
+// Tylko proces 0 komunikuje się bezpośrednio z innymi (topologia gwiazdy)
 vector<double> matrixVectorMultiplyMPI(const vector<vector<double>>& A, 
                                        const vector<double>& x,
                                        int rank, int size) {
