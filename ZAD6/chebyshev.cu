@@ -3,6 +3,7 @@
 #include <cmath>
 #include <random>
 #include <iomanip>
+#include <chrono>
 #include <cuda_runtime.h>
 
 using namespace std;
@@ -21,37 +22,18 @@ const int THREADS_PER_BLOCK = 256;
     } \
 }
 
-// =============================================================================
-// PROBLEM 1: OPERACJE ATOMOWE - Redukcja z wykorzystaniem atomicAdd
-// =============================================================================
 
-// Implementacja atomicAdd dla double (dla starszych GPU)
-__device__ double atomicAddDouble(double* address, double val) {
-    unsigned long long int* address_as_ull = (unsigned long long int*)address;
-    unsigned long long int old = *address_as_ull, assumed;
-    
-    do {
-        assumed = old;
-        old = atomicCAS(address_as_ull, assumed,
-                       __double_as_longlong(val + __longlong_as_double(assumed)));
-    } while (assumed != old);
-    
-    return __longlong_as_double(old);
-}
 
-// Kernel redukcji z użyciem shared memory i operacji atomowych
-__global__ void vectorNormKernel(const double* v, double* partial_sums, int n) {
+__global__ void vectorNormKernelAtomic(const double* v, double* result, int n) {
     extern __shared__ double sdata[];
     
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Każdy wątek oblicza swój kwadrat
     double val = (i < n) ? v[i] * v[i] : 0.0;
     sdata[tid] = val;
     __syncthreads();
     
-    // Redukcja w shared memory (logarytmiczna)
     for(int s = blockDim.x/2; s > 0; s >>= 1) {
         if(tid < s) {
             sdata[tid] += sdata[tid + s];
@@ -59,17 +41,13 @@ __global__ void vectorNormKernel(const double* v, double* partial_sums, int n) {
         __syncthreads();
     }
     
-    // OPERACJA ATOMOWA: pierwszy wątek w bloku dodaje wynik do globalnej pamięci
     if(tid == 0) {
-        atomicAddDouble(partial_sums, sdata[0]);
+        atomicAdd(result, sdata[0]);
     }
 }
 
-// =============================================================================
-// PROBLEM 2: OPERACJE REDUKCJI - Dwuetapowa redukcja dla dużych danych
-// =============================================================================
 
-// Etap 1: Redukcja w blokach
+
 __global__ void reduceBlocksKernel(const double* v, double* block_results, int n) {
     extern __shared__ double sdata[];
     
@@ -79,7 +57,6 @@ __global__ void reduceBlocksKernel(const double* v, double* block_results, int n
     sdata[tid] = (i < n) ? v[i] * v[i] : 0.0;
     __syncthreads();
     
-    // Redukcja w bloku
     for(int s = blockDim.x/2; s > 0; s >>= 1) {
         if(tid < s) {
             sdata[tid] += sdata[tid + s];
@@ -87,13 +64,11 @@ __global__ void reduceBlocksKernel(const double* v, double* block_results, int n
         __syncthreads();
     }
     
-    // Zapisz wynik bloku (bez atomicAdd - każdy blok ma swoje miejsce)
     if(tid == 0) {
         block_results[blockIdx.x] = sdata[0];
     }
 }
 
-// Etap 2: Finalna redukcja (dla małej liczby bloków)
 __global__ void reduceFinalKernel(const double* block_results, double* result, int num_blocks) {
     extern __shared__ double sdata[];
     
@@ -113,9 +88,7 @@ __global__ void reduceFinalKernel(const double* block_results, double* result, i
     }
 }
 
-// =============================================================================
-// Kernele operacji wektorowych
-// =============================================================================
+
 
 __global__ void vectorAddScaledKernel(double* x, const double* p, double alpha, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -149,9 +122,8 @@ __global__ void matrixVectorMultiplyKernel(const double* A, const double* x, dou
     }
 }
 
-// =============================================================================
-// PROBLEM 3: STRUMIENIE - Asynchroniczne wykonywanie operacji
-// =============================================================================
+// SOLVER CUDA
+
 
 class ChebyshevSolverCUDA {
 private:
@@ -159,7 +131,6 @@ private:
     double *d_A, *d_b, *d_x, *d_r, *d_p, *d_Ax;
     double *d_norm_result, *d_block_results;
     
-    // Strumienie dla różnych operacji
     cudaStream_t stream_compute;
     cudaStream_t stream_transfer;
     cudaStream_t stream_reduction;
@@ -172,17 +143,20 @@ public:
         threads_per_block = THREADS_PER_BLOCK;
         num_blocks = (n + threads_per_block - 1) / threads_per_block;
         
-        // Alokacja pamięci na GPU
-        CHECK_CUDA(cudaMalloc(&d_A, (size_t)n * n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_b, n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_x, n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_r, n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_p, n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_Ax, n * sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_norm_result, sizeof(double)));
-        CHECK_CUDA(cudaMalloc(&d_block_results, num_blocks * sizeof(double)));
+        if (num_blocks == 0) num_blocks = 1;
         
-        // STRUMIENIE: Tworzenie trzech niezależnych strumieni
+        size_t matrix_size = (size_t)n * n * sizeof(double);
+        size_t vector_size = (size_t)n * sizeof(double);
+        
+        CHECK_CUDA(cudaMalloc(&d_A, matrix_size));
+        CHECK_CUDA(cudaMalloc(&d_b, vector_size));
+        CHECK_CUDA(cudaMalloc(&d_x, vector_size));
+        CHECK_CUDA(cudaMalloc(&d_r, vector_size));
+        CHECK_CUDA(cudaMalloc(&d_p, vector_size));
+        CHECK_CUDA(cudaMalloc(&d_Ax, vector_size));
+        CHECK_CUDA(cudaMalloc(&d_norm_result, sizeof(double)));
+        CHECK_CUDA(cudaMalloc(&d_block_results, (size_t)num_blocks * sizeof(double)));
+        
         CHECK_CUDA(cudaStreamCreate(&stream_compute));
         CHECK_CUDA(cudaStreamCreate(&stream_transfer));
         CHECK_CUDA(cudaStreamCreate(&stream_reduction));
@@ -204,7 +178,6 @@ public:
     }
     
     void setMatrix(const double* A) {
-        // Transfer asynchroniczny w osobnym strumieniu
         CHECK_CUDA(cudaMemcpyAsync(d_A, A, (size_t)n * n * sizeof(double), 
                                    cudaMemcpyHostToDevice, stream_transfer));
     }
@@ -215,21 +188,13 @@ public:
         CHECK_CUDA(cudaStreamSynchronize(stream_transfer));
     }
     
-    // Obliczanie normy z użyciem redukcji dwuetapowej
-    double computeNorm(const double* d_vec) {
-        // Resetuj wynik
+    double computeNormAtomic(const double* d_vec) {
         CHECK_CUDA(cudaMemsetAsync(d_norm_result, 0, sizeof(double), stream_reduction));
         
-        // Etap 1: Redukcja w blokach (w strumieniu redukcji)
         int smem_size = threads_per_block * sizeof(double);
-        reduceBlocksKernel<<<num_blocks, threads_per_block, smem_size, stream_reduction>>>
-            (d_vec, d_block_results, n);
+        vectorNormKernelAtomic<<<num_blocks, threads_per_block, smem_size, stream_reduction>>>
+            (d_vec, d_norm_result, n);
         
-        // Etap 2: Finalna redukcja
-        reduceFinalKernel<<<1, threads_per_block, smem_size, stream_reduction>>>
-            (d_block_results, d_norm_result, num_blocks);
-        
-        // Kopiuj wynik
         double h_result;
         CHECK_CUDA(cudaMemcpyAsync(&h_result, d_norm_result, sizeof(double), 
                                    cudaMemcpyDeviceToHost, stream_reduction));
@@ -242,7 +207,6 @@ public:
         double d = (l_max + l_min) * 0.5;
         double c = (l_max - l_min) * 0.5;
         
-        // Inicjalizacja x = 0, r = b, p = r
         CHECK_CUDA(cudaMemsetAsync(d_x, 0, n * sizeof(double), stream_compute));
         CHECK_CUDA(cudaMemcpyAsync(d_r, d_b, n * sizeof(double), 
                                    cudaMemcpyDeviceToDevice, stream_compute));
@@ -254,32 +218,23 @@ public:
         int iter;
         
         for(iter = 0; iter < MAX_ITERATIONS; iter++) {
-            // STRUMIENIE: Operacje wykonywane w strumieniu obliczeniowym
-            
-            // x = x + alpha * p
             vectorAddScaledKernel<<<num_blocks, threads_per_block, 0, stream_compute>>>
                 (d_x, d_p, alpha, n);
             
-            // Ax = A * x
             matrixVectorMultiplyKernel<<<num_blocks, threads_per_block, 0, stream_compute>>>
                 (d_A, d_x, d_Ax, n);
             
-            // r = b - Ax
             vectorSubtractKernel<<<num_blocks, threads_per_block, 0, stream_compute>>>
                 (d_r, d_b, d_Ax, n);
             
-            // Synchronizuj przed obliczaniem normy
             CHECK_CUDA(cudaStreamSynchronize(stream_compute));
             
-            // Sprawdź zbieżność (używa stream_reduction)
-            double norm_r = computeNorm(d_r);
+            double norm_r = computeNormAtomic(d_r);
             if(norm_r < TOLERANCE) break;
             
-            // Aktualizacja parametrów
             double beta_new = pow(c / (2.0 * d), 2) * (1.0 - beta);
             double alpha_new = 1.0 / (d - beta_new * d);
             
-            // p = r + beta_new * p
             updateDirectionKernel<<<num_blocks, threads_per_block, 0, stream_compute>>>
                 (d_p, d_r, beta_new, n);
             
@@ -287,21 +242,34 @@ public:
             beta = beta_new;
         }
         
-        // Kopiuj wynik z powrotem
         x_result.resize(n);
-        CHECK_CUDA(cudaMemcpy(x_result.data(), d_x, n * sizeof(double), 
-                              cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpyAsync(x_result.data(), d_x, n * sizeof(double), 
+                                   cudaMemcpyDeviceToHost, stream_transfer));
+        CHECK_CUDA(cudaStreamSynchronize(stream_transfer));
         
         return iter;
     }
 };
 
-// =============================================================================
-// Funkcje testowe
-// =============================================================================
+
+// FUNKCJE POMOCNICZE
+
+vector<double> matrixVectorMultiplySeq(const vector<double>& A, const vector<double>& x, int n) {
+    vector<double> result(n, 0.0);
+    for(int i = 0; i < n; i++) {
+        for(int j = 0; j < n; j++) {
+            result[i] += A[i * n + j] * x[j];
+        }
+    }
+    return result;
+}
+
+// ============================================================================
+// TESTY
+// ============================================================================
 
 void runAutotest() {
-    cout << "=== AUTOTEST CUDA (2x2) ===\n";
+    cout << "=== AUTOTEST CUDA (2x2) - RTX 5050 Optimized ===\n";
     
     int n = 2;
     double A[4] = {4.0, 1.0, 1.0, 3.0};
@@ -320,14 +288,20 @@ void runAutotest() {
 }
 
 void runBenchmark() {
-    int sizes[] = {100, 500, 1000, 10000};
+    // STAŁY SEED dla powtarzalności
+    srand(42);
+    
+    int sizes[] = {10, 100, 1000, 10000};
     int num_tests = sizeof(sizes) / sizeof(sizes[0]);
     
     cout << fixed << setprecision(2);
     cout << setw(6) << "N" << " | " 
+         << setw(11) << "T_sekw [ms]" << " | "
+         << setw(8) << "It_sekw" << " | "
          << setw(11) << "T_CUDA [ms]" << " | " 
-         << setw(8) << "Iteracje" << endl;
-    cout << string(40, '-') << endl;
+         << setw(8) << "It_CUDA" << " | "
+         << "Przysp." << endl;
+    cout << string(78, '-') << endl;
     
     for(int t = 0; t < num_tests; t++) {
         int n = sizes[t];
@@ -346,6 +320,58 @@ void runBenchmark() {
             b[i] = (double)(rand() % 100);
         }
         
+        double l_min = 5.0, l_max = n * 1.5;
+        double d = (l_max + l_min) * 0.5;
+        double c = (l_max - l_min) * 0.5;
+        
+        // ========================================================================
+        // WERSJA SEKWENCYJNA
+        // ========================================================================
+        auto t_seq_start = chrono::high_resolution_clock::now();
+        
+        vector<double> x_seq(n, 0.0);
+        vector<double> r_seq = b;
+        vector<double> p_seq = r_seq;
+        double alpha_seq = 1.0 / d;
+        double beta_seq = 0.0;
+        int iter_seq;
+        
+        for(iter_seq = 0; iter_seq < MAX_ITERATIONS; iter_seq++) {
+            for(int i = 0; i < n; i++) {
+                x_seq[i] += alpha_seq * p_seq[i];
+            }
+            
+            vector<double> Ax_seq = matrixVectorMultiplySeq(A, x_seq, n);
+            
+            for(int i = 0; i < n; i++) {
+                r_seq[i] = b[i] - Ax_seq[i];
+            }
+            
+            double norm_r = 0.0;
+            for(int i = 0; i < n; i++) {
+                norm_r += r_seq[i] * r_seq[i];
+            }
+            norm_r = sqrt(norm_r);
+            
+            if(norm_r < TOLERANCE) break;
+            
+            double beta_new = pow(c / (2.0 * d), 2) * (1.0 - beta_seq);
+            double alpha_new = 1.0 / (d - beta_new * d);
+            
+            for(int i = 0; i < n; i++) {
+                p_seq[i] = r_seq[i] + beta_new * p_seq[i];
+            }
+            
+            alpha_seq = alpha_new;
+            beta_seq = beta_new;
+        }
+        
+        auto t_seq_end = chrono::high_resolution_clock::now();
+        float time_seq_ms = chrono::duration<float, milli>(t_seq_end - t_seq_start).count();
+        
+        // ========================================================================
+        // WERSJA CUDA
+        // ========================================================================
         ChebyshevSolverCUDA solver(n);
         solver.setMatrix(A.data());
         solver.setRHS(b.data());
@@ -355,24 +381,33 @@ void runBenchmark() {
         cudaEventCreate(&stop);
         
         cudaEventRecord(start);
-        vector<double> x;
-        int iter = solver.solve(5.0, n * 1.5, x);
+        vector<double> x_cuda;
+        int iter_cuda = solver.solve(l_min, l_max, x_cuda);
         cudaEventRecord(stop);
         
         cudaEventSynchronize(stop);
-        float milliseconds = 0;
-        cudaEventElapsedTime(&milliseconds, start, stop);
-        
-        cout << setw(6) << n << " | " 
-             << setw(11) << milliseconds << " | " 
-             << setw(8) << iter << endl;
+        float time_cuda_ms = 0;
+        cudaEventElapsedTime(&time_cuda_ms, start, stop);
         
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
+        
+        // Wyniki
+        double speedup = (time_cuda_ms > 0) ? (time_seq_ms / time_cuda_ms) : 0;
+        
+        cout << setw(6) << n << " | ";
+        cout << setw(11) << time_seq_ms << " | ";
+        cout << setw(8) << iter_seq << " | ";
+        cout << setw(11) << time_cuda_ms << " | ";
+        cout << setw(8) << iter_cuda << " | ";
+        cout << speedup << "x" << endl;
     }
 }
 
 int main() {
+    cout << "=== Chebyshev Solver CUDA - Optimized for RTX 5050 ===\n";
+    cout << "Using NATIVE atomicAdd for double precision\n\n";
+    
     runAutotest();
     runBenchmark();
     return 0;

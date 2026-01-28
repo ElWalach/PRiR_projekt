@@ -18,8 +18,7 @@ double vectorNorm(const vector<double>& v) {
     return sqrt(sum);
 }
 
-// Równoległe mnożenie macierzy przez wektor: Gatherv + Bcast
-// Zapewnia brak relacji sąsiedztwa (wszystko przechodzi przez Roota)
+
 vector<double> matrixVectorMultiplyParallel(const double* local_A, const vector<double>& x, int n, int local_rows, int rank, int size, int* row_counts, int* row_start) {
     vector<double> local_res(local_rows, 0.0);
     for (int i = 0; i < local_rows; i++) {
@@ -123,6 +122,9 @@ int main(int argc, char** argv) {
         cout << string(78, '-') << endl;
     }
 
+
+//podzial wierszy dla procesów
+
     for (int t = 0; t < num_tests; t++) {
         int n = sizes[t];
         int* row_counts = new int[size];
@@ -140,6 +142,8 @@ int main(int argc, char** argv) {
         vector<double> b(n);
         double* full_A = nullptr;
 
+// generowanie macierzy (tylko proces macierzysty)
+
         if (rank == 0) {
             full_A = new double[(size_t)n * n];
             for (int i = 0; i < n; i++) {
@@ -154,12 +158,14 @@ int main(int argc, char** argv) {
         }
 
         int* send_counts_A = new int[size];
-        int* displs_A = new int[size];
+        int* displs_A = new int[size]; 
+
+        //przeliczenie wierszy na liczbe elementow do wyslania
         for (int i = 0; i < size; i++) {
             send_counts_A[i] = row_counts[i] * n;
             displs_A[i] = row_start[i] * n;
         }
-
+// rozeslanie podzielonej macierzy i calego wektora do procesow
         MPI_Scatterv(full_A, send_counts_A, displs_A, MPI_DOUBLE, local_A, local_rows * n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         MPI_Bcast(b.data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
@@ -168,6 +174,8 @@ int main(int argc, char** argv) {
         double c = (l_max - l_min) * 0.5;
 
         // --- TEST RÓWNOLEGŁY ---
+
+        //synchronizacja przed pomiarem czasu
         MPI_Barrier(MPI_COMM_WORLD);
         double t_par_start = MPI_Wtime();
         vector<double> x(n, 0.0), r = b, p = r;
@@ -176,11 +184,18 @@ int main(int argc, char** argv) {
 
         for (iter_par = 0; iter_par < MAX_ITERATIONS; iter_par++) {
             for (int i = 0; i < n; i++) x[i] += alpha * p[i];
+
             vector<double> Ap = matrixVectorMultiplyParallel(local_A, x, n, local_rows, rank, size, row_counts, row_start);
-            for (int i = 0; i < n; i++) r[i] = b[i] - Ap[i];
+            
+            
+            for (int i = 0; i < n; i++) 
+            r[i] = b[i] - Ap[i];
+
             if (vectorNorm(r) < TOLERANCE) break;
+
             double beta_new = pow(c / (2.0 * d), 2) * (1.0 - beta);
             double alpha_new = 1.0 / (d - beta_new * d);
+
             for (int i = 0; i < n; i++) p[i] = r[i] + beta_new * p[i];
             alpha = alpha_new; beta = beta_new;
         }
@@ -195,12 +210,18 @@ int main(int argc, char** argv) {
             int iter_seq;
 
             for (iter_seq = 0; iter_seq < MAX_ITERATIONS; iter_seq++) {
+               
                 for (int i = 0; i < n; i++) x_s[i] += sa * p_s[i];
+               
                 vector<double> Ap_s = matrixVectorMultiplySeq(A_vec, x_s, n);
+               
                 for (int i = 0; i < n; i++) r_s[i] = b[i] - Ap_s[i];
+               
                 if (vectorNorm(r_s) < TOLERANCE) break;
+               
                 double bn = pow(c / (2.0 * d), 2) * (1.0 - sb);
                 double an = 1.0 / (d - bn * d);
+               
                 for (int i = 0; i < n; i++) p_s[i] = r_s[i] + bn * p_s[i];
                 sa = an; sb = bn;
             }

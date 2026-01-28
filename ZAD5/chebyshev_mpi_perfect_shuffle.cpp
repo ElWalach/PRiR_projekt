@@ -19,8 +19,6 @@ double vectorNorm(const vector<double>& v) {
 
 // Funkcja Perfect Shuffle: oblicza docelowy proces
 int perfectShuffle(int rank, int size) {
-    // Perfect shuffle dla 8 procesów: rank -> (2*rank) % (size-1) dla rank < size-1
-    // rank = size-1 pozostaje na miejscu
     if (rank == size - 1) return size - 1;
     return (2 * rank) % (size - 1);
 }
@@ -28,57 +26,60 @@ int perfectShuffle(int rank, int size) {
 // Funkcja odwrotna do Perfect Shuffle
 int inverseShuffle(int rank, int size) {
     if (rank == size - 1) return size - 1;
-    // Znajdź r takie że (2*r) % (size-1) = rank
     for (int r = 0; r < size - 1; r++) {
         if ((2 * r) % (size - 1) == rank) return r;
     }
     return rank;
 }
 
-// Równoległe mnożenie macierzy przez wektor z topologią Perfect Shuffle
+// Równoległe mnożenie macierzy przez wektor z topologią Perfect Shuffle 
 vector<double> matrixVectorMultiplyPerfectShuffle(const double* local_A, const vector<double>& x, 
                                                    int n, int local_rows, int rank, int size, 
                                                    int* row_counts, int* row_start) {
     vector<double> local_res(local_rows, 0.0);
     
-    // Obliczenie lokalnego wyniku
+    // Obliczenie lokalnego fragmentu wyniku (iloczyn skalarny wierszy)
     for (int i = 0; i < local_rows; i++) {
         for (int j = 0; j < n; j++) {
             local_res[i] += local_A[i * n + j] * x[j];
         }
     }
     
-    vector<double> full_res(n);
-    
-    // Faza 1: Zbieranie danych przez Perfect Shuffle
-    // Każdy proces wysyła swoje dane do procesu określonego przez perfect shuffle
-    int log_size = (int)ceil(log2(size));
-    
-    // Bufor do zbierania danych
+    vector<double> full_res(n, 0.0);
+    vector<double> send_buffer(n, 0.0);
     vector<double> recv_buffer(n, 0.0);
-    vector<int> recv_counts(size, 0);
     
-    // Inicjalizacja - każdy proces zna swoje dane
+    // Umieszczenie lokalnych wyników w odpowiednim miejscu globalnego wektora
     for (int i = 0; i < local_rows; i++) {
         full_res[row_start[rank] + i] = local_res[i];
     }
     
-    // Perfect Shuffle communication pattern
-    // Wykonujemy log2(size) kroków wymiany danych
+    int log_size = (int)ceil(log2(size));
+    
+    // Algorytm Shuffle-Exchange do  wymiany danych miedzy soba
     for (int step = 0; step < log_size; step++) {
-        int partner = rank ^ (1 << step);  // XOR dla komunikacji typu hypercube
+        // 1. KROK SHUFFLE: Przesunięcie danych zgodnie z topologią 
+        int target = perfectShuffle(rank, size);
+        int source = inverseShuffle(rank, size);
         
-        if (partner < size) {
-            // Wymiana danych z partnerem
-            MPI_Sendrecv(full_res.data(), n, MPI_DOUBLE, partner, 0,
-                        recv_buffer.data(), n, MPI_DOUBLE, partner, 0,
-                        MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            
-            // Łączenie danych (max lub suma w zależności od potrzeb)
-            for (int i = 0; i < n; i++) {
-                if (recv_buffer[i] != 0.0) {
-                    full_res[i] = recv_buffer[i];
-                }
+        MPI_Sendrecv(full_res.data(), n, MPI_DOUBLE, target, 0,
+                     recv_buffer.data(), n, MPI_DOUBLE, source, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        
+        full_res = recv_buffer; // Aktualizacja stanu po przemieszczeniu danych
+
+        // 2. KROK EXCHANGE: Wymiana z partnerem (bit-exchange) w celu agregacji
+        // Używamy XOR, aby połączyć procesy w pary (0-1, 2-3, 4-5, 6-7)
+        int partner = rank ^ 1; 
+        
+        MPI_Sendrecv(full_res.data(), n, MPI_DOUBLE, partner, 1,
+                     recv_buffer.data(), n, MPI_DOUBLE, partner, 1,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        
+        // Sumowanie odebranych danych (Agregacja częściowych wyników)
+        for (int i = 0; i < n; i++) {
+            if (abs(recv_buffer[i]) > 1e-15) {
+                full_res[i] += recv_buffer[i];
             }
         }
     }
@@ -168,11 +169,9 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    // Sprawdzenie czy liczba procesów = 8
     if (size != 8) {
         if (rank == 0) {
             cerr << "BŁĄD: Ten program wymaga dokładnie 8 procesów!\n";
-            cerr << "Uruchom z: mpirun -np 8 ./program\n";
         }
         MPI_Finalize();
         return 1;
@@ -208,7 +207,6 @@ int main(int argc, char** argv) {
         
         int* row_counts = new int[size];
         int* row_start = new int[size];
-        
         int rows_per_proc = n / size;
         int remainder = n % size;
         
@@ -250,7 +248,6 @@ int main(int argc, char** argv) {
         double d = (l_max + l_min) * 0.5;
         double c = (l_max - l_min) * 0.5;
         
-        // --- TEST RÓWNOLEGŁY z Perfect Shuffle ---
         MPI_Barrier(MPI_COMM_WORLD);
         double t_par_start = MPI_Wtime();
         
@@ -279,7 +276,6 @@ int main(int argc, char** argv) {
         
         double time_parallel_ms = (MPI_Wtime() - t_par_start) * 1000.0;
         
-        // --- TEST SEKWENCYJNY ---
         if (rank == 0) {
             double t_seq_start = MPI_Wtime();
             vector<double> x_s(n, 0.0), r_s = b, p_s = r_s;
@@ -289,20 +285,13 @@ int main(int argc, char** argv) {
             
             for (iter_seq = 0; iter_seq < MAX_ITERATIONS; iter_seq++) {
                 for (int i = 0; i < n; i++) x_s[i] += sa * p_s[i];
-                
                 vector<double> Ap_s = matrixVectorMultiplySeq(A_vec, x_s, n);
-                
                 for (int i = 0; i < n; i++) r_s[i] = b[i] - Ap_s[i];
-                
                 if (vectorNorm(r_s) < TOLERANCE) break;
-                
                 double bn = pow(c / (2.0 * d), 2) * (1.0 - sb);
                 double an = 1.0 / (d - bn * d);
-                
                 for (int i = 0; i < n; i++) p_s[i] = r_s[i] + bn * p_s[i];
-                
-                sa = an; 
-                sb = bn;
+                sa = an; sb = bn;
             }
             
             double time_seq_ms = (MPI_Wtime() - t_seq_start) * 1000.0;
@@ -316,10 +305,8 @@ int main(int argc, char** argv) {
                  << speedup << "x" << endl;
         }
         
-        delete[] row_counts; 
-        delete[] row_start;
-        delete[] send_counts_A; 
-        delete[] displs_A;
+        delete[] row_counts; delete[] row_start;
+        delete[] send_counts_A; delete[] displs_A;
         delete[] local_A;
         if (rank == 0) delete[] full_A;
     }
